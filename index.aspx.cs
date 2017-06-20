@@ -7,11 +7,11 @@ using System.Web.UI.WebControls;
 
 namespace RpiWebService
 {
-    public partial class index : System.Web.UI.Page
+    public partial class index : Page
     {
         protected void Page_Load(object sender, EventArgs e)
         {
-
+            
         }
     }
 }

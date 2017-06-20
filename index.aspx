@@ -59,14 +59,19 @@
         <div class="WeatherContainer">
             <div class="WeatherUpperBlock">
                 <div class="WeatherLogo">
-                    <img id="curWeather"/>
+                    <img id="curWeather" />
                 </div>
                 <span id="weatherLocation"></span>
                 <br />
-                <span id="weatherText"></span>
+                <span id="weatherUpperText"></span>
+                <br />
+                <span id="weatherLowerText"></span>
+                <br />
+                <span id="weatherOthInfo"></span>
+                <br />
+                <span id="LastUpdate"></span>
             </div>
             <div class="WeatherLowerBlock">
-                
             </div>
         </div>
         <div class="ScheduleContainer">
@@ -90,13 +95,28 @@
         TimeTextLine.textContent = strftime('%O %H:%M:%S');
     }, 1000);
 
-    var wSocket_weather = new WebSocket('ws://192.168.1.199:10080/Api/WeatherHandler.ashx');
-    var wSocket_sched = new WebSocket('ws://192.168.1.199:10080/Api/ScheduleHandler.ashx');
+    //var host = 'localhost:50195';
+    var host = '192.168.1.199:10080';
+    //var wSocket_weather = new WebSocket('ws://192.168.1.199:10080/Api/WeatherHandler.ashx');
+    //var wSocket_sched = new WebSocket('ws://192.168.1.199:10080/Api/ScheduleHandler.ashx');
+    var wSocket_weather = new WebSocket('ws://' + host + '/Api/WeatherHandler.ashx');
+    //var wSocket_sched = new WebSocket('ws://' + host + '/Api/ScheduleHandler.ashx');
 
-    wSocket_weather.onopen = function (evt)
-    {
-        //Supported location types: City, CityCountry, Geo, Zip
-        wSocket_weather.send('locationType=CityCountry;location=Albuquerque,NM;metricType=1')
+    wSocket_weather.onopen = function (evt) {
+        //Supported location types: q(city name),id(city id),geo(geographic coordinates),zip(zip code)
+        wSocket_weather.send('queryType=id;query=Albuquerque,US;metricType=1;')
+    }
+    wSocket_weather.onmessage = function (evt) {
+        var data = JSON.parse(evt.data);
+        $('#curWeather')[0].src = 'http://' + host + '/Images/weatherIcons/' + data.icon + '.png';
+        $('#weatherLocation')[0].textContent = data.loc;
+        $('#weatherUpperText')[0].textContent = data.weatherTextUpper;
+        $('#weatherLowerText')[0].textContent = data.weatherTextLower;
+        $('#weatherOthInfo')[0].textContent = data.weatherOthInfo;
+        $('#LastUpdate')[0].textContent = data.LastUpdate;
+    }
+    wSocket_weather.onclose = function (evt) {
+        wSocket_weather = new WebSocket('ws://' + host + '/Api/WeatherHandler.ashx');
     }
 
 </script>

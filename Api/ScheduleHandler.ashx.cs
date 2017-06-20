@@ -33,17 +33,17 @@ namespace RpiWebService.Api
             }
         }
 
-        private async static Task scheduleSocketHandler(AspNetWebSocketContext context)
+        private static Task scheduleSocketHandler(AspNetWebSocketContext context)
         {
             var socket = context.WebSocket;
-            while(true)
+            while (true)
             {
                 byte[] nbuf = new byte[2048];
                 ArraySegment<byte> buffer = new ArraySegment<byte>();
                 if (socket.State == WebSocketState.Open)
                 {
                     Dictionary<string, string> JsonValueDict = new Dictionary<string, string>();
-
+                    
                 }
             }
         }

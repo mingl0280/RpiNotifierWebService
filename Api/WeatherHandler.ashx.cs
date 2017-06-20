@@ -6,9 +6,12 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Web;
 using System.Web.WebSockets;
-using System.Xml;
+using System.Data.SQLite;
+using System.Configuration;
+using System.Web.Configuration;
 using static System.Text.Encoding;
-using Microsoft.Win32;
+using System.Web.Script.Serialization;
+using System.Diagnostics;
 
 namespace RpiWebService.Api
 {
@@ -17,67 +20,280 @@ namespace RpiWebService.Api
     /// </summary>
     public class WeatherHandler : IHttpHandler
     {
-        private static Thread schedUpdateThread = new Thread(weatherUpdateWorker);
+        private static Thread weatherUpdateThread = new Thread(weatherUpdateWorker);
         private static Thread textUpdateThread = new Thread(textUpdateWorker);
+        private static Thread MsgRecvThread = new Thread(OnMsgReceived);
+        private static SQLiteConnection sqlConn;
         private static CurrentWeather cw;
-        private string apikey;
-
-        public WeatherHandler()
-        {
-            System.Configuration.Configuration rootWebConfig1 =
-                System.Web.Configuration.WebConfigurationManager.OpenWebConfiguration(null);
-            if (rootWebConfig1.AppSettings.Settings.Count > 0)
-            {
-                System.Configuration.KeyValueConfigurationElement customSetting =
-                    rootWebConfig1.AppSettings.Settings["ApiKey"];
-                if (customSetting != null)
-                    apikey = customSetting.Value;
-                else
-                    Console.WriteLine("Invalid or unset api key.");
-            }
-        }
+        private static string cwQueryString;
+        private static int intMetricType;
+        private static string apikey;
 
         public void ProcessRequest(HttpContext context)
         {
-            //context.Response.ContentType = "text/plain";
-            //context.Response.Write("Hello World");
+            string setting = ConfigurationManager.AppSettings["ApiKey"];
+            string strFormat = "", strValue = "";
+            if (!string.IsNullOrEmpty(setting))
+            {
+                apikey = setting;
+            }
+            else
+            {
+                Console.WriteLine("Invalid or unset api key.");
+                return;
+            }
+            setting = ConfigurationManager.AppSettings["ConnStringFormat"];
+            if (!string.IsNullOrEmpty(setting))
+            {
+                strFormat = setting;
+            }
+            else
+            {
+                Console.WriteLine("Invalid connection string format.");
+                return;
+            }
+            setting = ConfigurationManager.AppSettings["SQLiteFile"];
+            if (!string.IsNullOrEmpty(setting))
+            {
+                strValue = setting;
+            }
+            else
+            {
+                Console.WriteLine("Invalid connection string filename.");
+                return;
+            }
+
+            string connstr = string.Format(strFormat, context.Server.MapPath(strValue));
+            sqlConn = new SQLiteConnection(connstr);
+            try
+            {
+                sqlConn.Close();
+            }
+            catch (Exception) { }
+
+            sqlConn.Open();
             if (context.IsWebSocketRequest)
                 context.AcceptWebSocketRequest(weatherSocketHandler);
         }
 
-        private static void weatherUpdateWorker()
+        private static void weatherUpdateWorker(object s)
         {
+            WebSocket socket = (WebSocket)s;
             while (true)
             {
-
-                Thread.Sleep(30*60*1000);
+                cw = new CurrentWeather();
+                cw.fetchWeatherData(cwQueryString, apikey, intMetricType, "zh_cn");
+                if (textUpdateThread.ThreadState != System.Threading.ThreadState.Running)
+                {
+                    try
+                    {
+                        textUpdateThread = new Thread(textUpdateWorker);
+                        textUpdateThread.Start(socket);
+                    }
+                    catch (Exception)
+                    { }
+                }
+                Thread.Sleep(30 * 60 * 1000);
             }
         }
 
-        private static void textUpdateWorker()
+        private static void textUpdateWorker(object s)
         {
+            WebSocket socket = (WebSocket)s;
+            int intervalSeconds = 30;
             while (true)
             {
-                Thread.Sleep(30 * 1000);
+                int counter = 0;
+                while (cw.IsReady == false)
+                {
+                    Thread.Sleep(50);
+                    counter++;
+                    if (counter >= 10)
+                    {
+                        intervalSeconds = 1;
+                        break;
+                    }
+                    else
+                    {
+                        intervalSeconds = 30;
+                    }
+                }
+                sendMsg(socket);
+                Thread.Sleep(intervalSeconds * 1000);
             }
+        }
+
+        private static void sendMsg(WebSocket socket)
+        {
+            if (cw.WeatherInfo == null)
+            {
+                Dictionary<string, string> msgDic = new Dictionary<string, string>();
+                msgDic.Add("icon", "");
+                msgDic.Add("loc", "Initializing...");
+                msgDic.Add("weatherTextUpper", "Initializing...");
+                msgDic.Add("weatherTextLower", "Initializing...");
+                socket.SendAsync(new ArraySegment<byte>(UTF8.GetBytes(new JavaScriptSerializer().Serialize(msgDic))), WebSocketMessageType.Text, true, CancellationToken.None);
+            }
+            else
+            {
+                Dictionary<string, string> msgDic = new Dictionary<string, string>();
+                msgDic.Add("icon", cw.WeatherInfo.IconId);
+                msgDic.Add("loc", (cw.CityInfo.CityName + " " + cw.CityInfo.CityCountry).Trim());
+                msgDic.Add("weatherTextUpper",
+                    cw.WeatherInfo.WeatherDescription +
+                    " 当前温度: " + cw.AtomosphereInfo.TempNow.ToString() + (
+                        cw.MetricType == 2 ? "°F" : ((cw.MetricType == 1) ? "°C" : " K"))
+                        );
+                msgDic.Add("weatherTextLower",
+                    "湿度: " + cw.AtomosphereInfo.Humdity.ToString() + "%  气压: " + cw.AtomosphereInfo.Pressure.ToString() + " " + cw.AtomosphereInfo.PressureUnit);
+                msgDic.Add("weatherOthInfo",
+                    "风向: " + cw.WindStatus.Direction.ToString() + "° " + cw.WindStatus.DirectionCode + " " + cw.WindStatus.Speed.ToString() + (cw.MetricType == 2 ? "mph" : @" m/s"));
+                msgDic.Add("LastUpdate", "最近更新: " + cw.LastUpdate.ToLocalTime().ToLongDateString() + " " + cw.LastUpdate.ToLocalTime().ToLongTimeString());
+
+
+                socket.SendAsync(new ArraySegment<byte>(UTF8.GetBytes(new JavaScriptSerializer().Serialize(msgDic))), WebSocketMessageType.Text, true, CancellationToken.None);
+                //await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Fetch Succeed", new CancellationToken(true));
+                //textUpdateThread.Abort();
+                //weatherUpdateThread.Abort();
+            }
+        }
+
+        private static void OnMsgReceived(object s)
+        {
+            MsgRecvStruct msg = (MsgRecvStruct)s;
+            ArraySegment<byte> buffer = msg.buf;
+            byte[] nbuf = msg.nbuf;
+            WebSocket socket = msg.sock;
+            var data = buffer.Array.Where(x => x != 0).ToArray();
+            string initString = UTF8.GetString(data, 0, data.Length);
+            string[] initOptions = initString.Split(';');
+            Dictionary<string, string> Options = new Dictionary<string, string>();
+            bool isGeo = false;
+            string queryKey = "";
+            foreach (string option in initOptions)
+            {
+                string[] KeyValues = option.Split('=');
+
+                switch (KeyValues[0])
+                {
+                    case "queryType":
+                        if (KeyValues[1] == "geo")
+                        {
+                            Options.Add("lat", "");
+                            Options.Add("lon", "");
+                            isGeo = true;
+                        }
+                        else
+                        {
+                            Options.Add(KeyValues[1], "");
+                            queryKey = KeyValues[1];
+                        }
+                        break;
+                    case "query":
+                        if (isGeo)
+                        {
+                            string[] LatLon = KeyValues[1].Split(',');
+                            Options["Lat"] = LatLon[0];
+                            Options["Lon"] = LatLon[1];
+                        }
+                        else
+                        {
+                            int id = 0;
+                            bool isint = int.TryParse(KeyValues[1], out id);
+                            if (queryKey == "id" && !isint)
+                            {
+                                if (KeyValues[1].IndexOf(',') > 0)
+                                {
+                                    string[] CityNation = KeyValues[1].Split(',');
+                                    SQLiteCommand query = new SQLiteCommand("SELECT id FROM CityList WHERE name Like @city AND country = @country ORDER BY name ASC LIMIT 0,1", sqlConn);
+
+                                    query.Parameters.AddWithValue("@city", CityNation[0] + '%');
+                                    query.Parameters.AddWithValue("@country", CityNation[1]);
+                                    try
+                                    {
+                                        query.VerifyOnly();
+                                    }
+                                    catch (Exception e)
+                                    {
+                                        Debug.WriteLine(e.Message);
+                                    }
+                                    var queryResult = query.ExecuteScalar();
+                                    if (queryResult != null)
+                                        if (int.TryParse(queryResult.ToString(), out id))
+                                        {
+                                            Options[queryKey] = id.ToString();
+                                        }
+                                }
+                                else
+                                {
+                                    SQLiteCommand query = new SQLiteCommand("SELECT id FROM CityList WHERE name Like @CITY ORDER BY name ASC LIMIT 0,1", sqlConn);
+                                    query.Prepare();
+                                    query.Parameters.AddWithValue("@CITY", KeyValues[1] + "%");
+                                    if (int.TryParse(query.ExecuteScalar().ToString(), out id))
+                                    {
+                                        Options[queryKey] = id.ToString();
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                Options[queryKey] = KeyValues[1];
+                            }
+                        }
+                        break;
+                    case "metricType":
+                        int.TryParse(KeyValues[1], out intMetricType);
+                        break;
+                }
+            }
+            cwQueryString = @"http://api.openweathermap.org/data/2.5/weather?";
+            string tmpQueryString = "";
+            foreach (KeyValuePair<string, string> UrlOpt in Options)
+            {
+                tmpQueryString += @"&" + UrlOpt.Key + @"=" + UrlOpt.Value;
+            }
+            tmpQueryString = tmpQueryString.TrimStart('&');
+            cwQueryString = cwQueryString + tmpQueryString;
+            try
+            {
+                weatherUpdateThread = new Thread(weatherUpdateWorker);
+                weatherUpdateThread.Start(socket);
+            }
+            catch (Exception) { }
+
+        }
+
+        private struct MsgRecvStruct
+        {
+            public WebSocket sock;
+            public ArraySegment<byte> buf;
+            public byte[] nbuf;
         }
 
         private async static Task weatherSocketHandler(AspNetWebSocketContext context)
         {
             var socket = context.WebSocket;
+            
             while (true)
             {
                 byte[] nbuf = new byte[2048];
-                ArraySegment<byte> buffer = new ArraySegment<byte>(); 
+                ArraySegment<byte> buffer = new ArraySegment<byte>(nbuf);
                 if (socket.State == WebSocketState.Open)
                 {
-                    schedUpdateThread.Start();
                     //Dictionary<string, string> JsonValueDict = new Dictionary<string, string>();
                     var initResults = await socket.ReceiveAsync(buffer, CancellationToken.None);
-                    
-                    var data = buffer.Array.Where(x => x != 0).ToArray();
-                    string initString = UTF8.GetString(data, 0, data.Length);
-                    
+                    MsgRecvStruct Msg;
+                    Msg.sock = socket;
+                    Msg.nbuf = nbuf;
+                    Msg.buf = buffer;
+                    MsgRecvThread = new Thread(OnMsgReceived);
+                    MsgRecvThread.Start(Msg);
+                    /*
+                    if (initResults.MessageType == WebSocketMessageType.Close)
+                    {
+                        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, string.Empty, CancellationToken.None);
+                    }*/
+
                 }
             }
         }
@@ -90,250 +306,4 @@ namespace RpiWebService.Api
             }
         }
     }
-
-    public class CurrentWeather
-    {
-        public int cityId { get; set; }
-        public cityinfo CityInfo { get { return cityInfo; } }
-        public metricType MetricType;
-        public atominfo AtomosphereInfo { get { return atomInfo; } }
-        public sunTime SunTime { get { return sTime; } }
-        public wind WindStatus { get { return wStatus; } }
-
-        private cityinfo cityInfo;
-        private atominfo atomInfo;
-        private sunTime sTime;
-        private wind wStatus;
-        private long visibility;
-        
-        public enum metricType
-        {
-            metric = 1,
-            imperial=2,
-            kelvin=0
-        }
-
-        public class cityinfo
-        {
-            public string CityName { get { return cityName; } }
-            public float CityLon { get { return cityLon; } }
-            public float CityLat { get { return cityLat; } }
-            public string CityCountry { get { return cityCountry; } }
-
-            private string cityName;
-            private float cityLon;
-            private float cityLat;
-            private string cityCountry;
-
-            public void setCityName(string cName)
-            {
-                cityName = cName;
-            }
-            public void setCityCoord(float lon, float lat)
-            {
-                cityLon = lon;
-                cityLat = lat;
-            }
-
-            public void setCityCountry(string country)
-            {
-                cityCountry = country;
-            }
-
-            public cityinfo()
-            {
-
-            }
-            public cityinfo(string name)
-            {
-                cityName = name;
-            }
-        }
-
-        public class sunTime
-        {
-            public String sunRise { get; }
-            public String sunSet { get; }
-
-            public sunTime(string Rise, string Set)
-            {
-                sunRise = DateTime.Parse(Rise).ToLocalTime().ToString();
-                sunSet = DateTime.Parse(Set).ToLocalTime().ToString();
-            }
-
-            public sunTime()
-            {
-                return;
-            }
-        }
-
-        public class wind
-        {
-            public float Speed { get { return speed; } }
-            public string WindName { get { return windName; } }
-            public int Direction { get { return direction; } }
-            public string DirectionCode { get { return directionCode; } }
-            public string DirectionName { get { return directionName; } }
-
-            private float speed ;
-            private string windName ;
-            private int direction ;
-            private string directionCode ;
-            private string directionName ;
-
-            public wind()
-            {
-
-            }
-            public wind(float spd, string wname, int dir, string dcode, string dname)
-            {
-                speed = spd;
-                windName = wname;
-                direction = dir;
-                directionCode = dcode;
-                directionName = dname;
-            }
-
-            public void setwindSpeed(float spd, string wname)
-            {
-                speed = spd;
-                windName = wname;
-            }
-
-            public void setwindDir(int dir, string dcode, string dname)
-            {
-                direction = dir;
-                directionCode = dcode;
-                directionName = dname;
-            }
-        }
-
-        public class atominfo
-        {
-            public float TempNow { get { return tempNow; } }
-            public float TempMin { get { return tempMin; } }
-            public float TempMax { get { return tempMax; } }
-            public int Humdity { get { return humdity; } }
-            public int Pressure { get { return pressure; } }
-            public string PressureUnit { get { return pressureUnit; } }
-            private float tempNow;
-            private float tempMin;
-            private float tempMax;
-            private int humdity;
-            private int pressure;
-            private string pressureUnit;
-
-            public void setTemp(float a, float b, float c)
-            {
-                tempNow = a;
-                tempMin = b;
-                tempMax = c;
-            }
-
-            public void setHumidity(int a)
-            {
-                humdity = a;
-            }
-
-            public void setPressure(int a, string b)
-            {
-                pressure = a;
-                pressureUnit = b;
-            }
-            
-            public atominfo()
-            { }
-            public atominfo(float a, float b, float c)
-            {
-                tempNow = a;
-                tempMin = b;
-                tempMax = c;
-            }
-        }
-        
-        
-        public CurrentWeather(int cid)
-        {
-            cityId = cid;
-        }
-
-        public bool processXMLString(string xmlText)
-        {
-            try
-            {
-                XmlDocument xDoc = new XmlDocument();
-                xDoc.LoadXml(xmlText);
-                if (xDoc.HasChildNodes)
-                {
-                    ProcNodeValues(xDoc.ChildNodes);
-                }
-                return true;
-            }
-            catch (Exception)
-            { return false; }
-        }
-
-        public bool fetchWeatherData(string OpenWeatherAPIUrl, string ApiKey, metricType mType)
-        {
-            try
-            {
-                XmlDocument xDoc = new XmlDocument();
-                string queryMetricType = "";
-                switch(mType)
-                {
-                    case metricType.kelvin:
-                        break;
-                    case metricType.imperial:
-                        queryMetricType = "&units=imperial";
-                        break;
-                    case metricType.metric:
-                        queryMetricType = "&units=metric";
-                        break;
-                    default:
-                        queryMetricType = "&units=metric";
-                        break;
-                }
-                xDoc.LoadXml(OpenWeatherAPIUrl + queryMetricType + "&mode=xml&appid=" + ApiKey);
-                if (xDoc.HasChildNodes)
-                {
-                    ProcNodeValues(xDoc.ChildNodes);
-                }
-                else
-                {
-                    return false;
-                }
-                return true;
-            }catch(Exception)
-            { return false; }
-        }
-
-        private void ProcNodeValues(XmlNodeList xNodeList)
-        {
-            foreach(XmlNode xNode in xNodeList)
-            {
-                if (xNode.HasChildNodes)
-                {
-                    ProcNodeValues(xNode.ChildNodes);
-                }
-                var xNodeAttribs = xNode.Attributes;
-                switch(xNode.Name)
-                {
-                    case "city":
-                        cityInfo = new cityinfo(xNodeAttribs["name"].Value);
-                        break;
-                    case "coord":
-                        cityInfo.setCityCoord(System.Convert.ToSingle(xNodeAttribs["lon"].Value), System.Convert.ToSingle(xNodeAttribs["lat"].Value));
-                        break;
-                    case "country":
-                        cityInfo.setCityCountry(xNode.Value);
-                        break;
-                    case "temperature":
-                        atomInfo = new atominfo();
-                        
-
-                }
-            }
-        }
-    }
-    
 }
