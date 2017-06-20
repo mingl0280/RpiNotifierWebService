@@ -1,0 +1,38 @@
+﻿body {
+    font-size:2em;
+    display: flex;
+    flex: 1;
+    min-height: 50vh;
+    align-items: center;
+    background-color:black;
+}
+.clockContainer, .WeatherContainer{
+    float:left;
+    width: 10%;
+    clear:left;
+    padding-left: 20%;
+    padding-top: 5%;
+}
+.DateTimeContainer, .ScheduleContainer{
+    padding-left: 25px;
+    float: left;
+    clear: right;
+    vertical-align: middle;
+    line-height: 80px;
+    padding-top: 7%;
+    text-align: center;
+    width: 60%;
+}
+.PageContainer {
+    width: 1280px;
+    height: 1024px;
+}
+.CapitalText{
+    font-size:1.5em;
+    font-weight:bold;
+    text-align: center;
+    color: white;
+}
+.CapitalText.small{
+    font-size:1em;
+}

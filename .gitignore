@@ -286,3 +286,8 @@ __pycache__/
 *.btm.cs
 *.odx.cs
 *.xsd.cs
+
+#web.config
+[Ww]eb.config
+[Ww]eb.[Dd]ebug.config
+[Ww]eb.[Rr]elease.config
